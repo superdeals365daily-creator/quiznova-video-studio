@@ -10,7 +10,7 @@
 h1{margin:0 0 8px;font-size:28px}.sub{color:#aeb9d3;margin-bottom:16px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.full{grid-column:1/-1}
 label{font-size:13px;color:#c9d4ef;display:block;margin:3px 0 6px}input,textarea,select{width:100%;background:#080d1c;color:#fff;border:1px solid #33415f;border-radius:10px;padding:12px;font-size:15px;outline:none}textarea{min-height:85px;resize:vertical}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.row>*{flex:1;min-width:150px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.row>*{flex:1;min-width:150px}.downloadBtn{display:block!important;text-align:center;text-decoration:none;border-radius:12px;padding:13px 18px;font-weight:800;cursor:pointer;background:#20d34d;color:#071020;font-size:15px}.downloadBtn.show{display:block!important}
 button{border:0;border-radius:12px;padding:13px 18px;font-weight:800;cursor:pointer;background:#ffd21a;color:#111;font-size:15px}
 button.secondary{background:#263452;color:#fff}.status{margin-top:10px;color:#9fb1d5;min-height:22px}
 canvas{width:min(100%,430px);height:auto;aspect-ratio:9/16;display:block;margin:0 auto;border-radius:16px;background:#000;box-shadow:0 10px 45px #000b}
@@ -66,13 +66,13 @@ canvas{width:min(100%,430px);height:auto;aspect-ratio:9/16;display:block;margin:
       <button id="stop" class="secondary">■ Stop</button>
     </div>
     <div class="row" style="margin-top:10px">
-      <a id="downloadVideoTop" href="#" download="quiznova-reel.mp4" style="display:none;text-decoration:none">⬇️ Download Generated Video</a>
+      <a id="downloadVideoTop" href="#" download="quiznova-reel.mp4" class="downloadBtn">⬇️ Download Generated Video</a>
     </div>
     <div id="status" class="status"></div>
     <div id="resultBox" class="resultBox">
       <h3>🎬 Generated Video</h3>
       <video id="resultVideo" controls playsinline></video>
-      <div class="row" style="margin-top:10px"><a id="downloadVideo" href="#" download="quiznova-reel.mp4" style="display:none;text-decoration:none">⬇️ Download Video</a></div>
+      <div class="row" style="margin-top:10px"><a id="downloadVideo" href="#" download="quiznova-reel.mp4" class="downloadBtn">⬇️ Download Video</a></div>
     </div>
   </div>
 
@@ -340,83 +340,195 @@ function generatePosters(){const d=data(),grid=document.getElementById('posterGr
 document.getElementById('generatePosters').onclick=generatePosters;document.getElementById('clearPosters').onclick=()=>{document.getElementById('posterGrid').innerHTML='';document.getElementById('posterStatus').textContent=''};
 
 function chooseMime(){
- const types=['video/mp4;codecs=h264,aac','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+ const types=[
+  'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+  'video/mp4;codecs=h264,aac',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm'
+ ];
  return types.find(x=>MediaRecorder.isTypeSupported(x))||'video/webm';
 }
+
 function downloadBlob(blob,name){
  if(!blob || !blob.size){console.warn('Download failed: empty blob');return false;}
  const url=URL.createObjectURL(blob);
  const a=document.createElement('a');
  a.href=url;
  a.download=name;
- a.textContent='⬇️ Download Video';
- a.style.display='none';
  a.rel='noopener';
+ a.style.position='fixed';a.style.left='-9999px';
  document.body.appendChild(a);
- try{a.click();}catch(e){console.warn('Auto download blocked',e);}
- setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},60000);
+ try{a.click();}catch(e){console.warn('Native download click failed',e);}
+ setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},120000);
  return true;
 }
 
 function showVideoDownload(blob,name='quiznova-reel.mp4'){
  if(!blob || !blob.size)return;
  const buttons=[document.getElementById('downloadVideo'),document.getElementById('downloadVideoTop')].filter(Boolean);
- buttons.forEach(btn=>{
-   if(btn.dataset.url)URL.revokeObjectURL(btn.dataset.url);
- });
  const url=URL.createObjectURL(blob);
  buttons.forEach(btn=>{
+   if(btn.dataset.url){try{URL.revokeObjectURL(btn.dataset.url)}catch(e){}}
    btn.dataset.url=url;
    btn.href=url;
    btn.download=name;
-   btn.textContent='⬇️ Download Generated Video';
-   btn.style.display='inline-block';
+   btn.textContent=name.toLowerCase().endsWith('.mp4')?'⬇️ Download MP4 Video':'⬇️ Download Video';
+   btn.style.display='block';
+   btn.classList.add('show');
  });
 }
 
-async function convertToMp4(webmBlob){
- document.getElementById('status').textContent='Converting to MP4… first-time FFmpeg load may take a little while.';
- try{
-   if(!window.FFmpeg){await new Promise((res,rej)=>{let s=document.createElement('script');s.src='https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s)})}
-   const {createFFmpeg,fetchFile}=FFmpeg;
-   const ff=createFFmpeg({log:false,corePath:'https://unpkg.com/@ffmpeg/core@0.11.6/dist/ffmpeg-core.js'});
-   await ff.load();
-   ff.FS('writeFile','input.webm',await fetchFile(webmBlob));
-   await ff.run('-i','input.webm','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-movflags','+faststart','-an','output.mp4');
-   const data=ff.FS('readFile','output.mp4');
-   return new Blob([data.buffer],{type:'video/mp4'});
- }catch(e){console.warn(e);return null}
+/*
+  Reliable browser-side WebM -> MP4 conversion.
+  The old ffmpeg 0.11 loader could fail on mobile/CDN because the worker/core
+  were fetched cross-origin. This version uses ffmpeg.wasm 0.12 and converts
+  the CDN files to same-origin Blob URLs before loading them.
+*/
+let ffmpegInstance=null;
+let ffmpegObjectUrls=[];
+
+async function urlToBlobUrl(url,type){
+ const r=await fetch(url,{mode:'cors',cache:'force-cache'});
+ if(!r.ok)throw new Error('FFmpeg file download failed: '+r.status);
+ const b=await r.blob();
+ const u=URL.createObjectURL(new Blob([b],{type}));
+ ffmpegObjectUrls.push(u);
+ return u;
 }
 
-document.getElementById('downloadVideo').onclick=(e)=>{e.preventDefault();if(lastVideoBlob)showVideoDownload(lastVideoBlob,'quiznova-reel.mp4')};
+async function getFFmpeg(){
+ if(ffmpegInstance) return ffmpegInstance;
+ const status=document.getElementById('status');
+ status.textContent='⏳ Loading MP4 engine…';
+
+ // Load the modern FFmpeg API as an ES module.
+ const mod=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js');
+ const FFmpegClass=mod.FFmpeg;
+ if(!FFmpegClass)throw new Error('Modern FFmpeg API unavailable');
+
+ const ff=new FFmpegClass();
+ ff.on('progress',({progress})=>{
+   const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100)));
+   status.textContent='⏳ Converting WebM → MP4… '+pct+'%';
+ });
+ ff.on('log',({message})=>console.log('[FFmpeg]',message));
+
+ const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/';
+ const coreURL=await urlToBlobUrl(base+'ffmpeg-core.js','text/javascript');
+ const wasmURL=await urlToBlobUrl(base+'ffmpeg-core.wasm','application/wasm');
+ const workerURL=await urlToBlobUrl(base+'ffmpeg-core.worker.js','text/javascript');
+
+ status.textContent='⏳ Starting MP4 engine…';
+ await ff.load({coreURL,wasmURL,workerURL});
+ ffmpegInstance=ff;
+ return ff;
+}
+
+async function convertToMp4(webmBlob){
+ if(!webmBlob || !webmBlob.size)throw new Error('Recorded WebM is empty');
+ const status=document.getElementById('status');
+ const ff=await getFFmpeg();
+ const inputName='quiznova-input.webm';
+ const outputName='quiznova-output.mp4';
+ try{
+   status.textContent='⏳ Preparing video for MP4 conversion…';
+   await ff.writeFile(inputName,new Uint8Array(await webmBlob.arrayBuffer()));
+   status.textContent='⏳ Converting WebM → MP4… 0%';
+   await ff.exec([
+     '-i',inputName,
+     '-c:v','libx264','-preset','ultrafast','-crf','28',
+     '-pix_fmt','yuv420p',
+     '-c:a','aac','-b:a','128k',
+     '-movflags','+faststart',
+     outputName
+   ]);
+   const data=await ff.readFile(outputName);
+   if(!data || !data.length)throw new Error('MP4 output empty');
+   try{await ff.deleteFile(inputName);await ff.deleteFile(outputName)}catch(e){}
+   status.textContent='✅ MP4 conversion complete — 100%';
+   return new Blob([data.buffer],{type:'video/mp4'});
+ }catch(e){
+   try{await ff.deleteFile(inputName)}catch(_e){}
+   try{await ff.deleteFile(outputName)}catch(_e){}
+   throw new Error('MP4 conversion failed: '+(e.message||e));
+ }
+}
+
+function startVideoDownload(e){
+ if(!lastVideoBlob || !lastVideoBlob.size){
+   e.preventDefault();
+   document.getElementById('status').textContent='⏳ Pehle video generate hone do.';
+   return false;
+ }
+ const isMp4=lastVideoBlob.type && lastVideoBlob.type.toLowerCase().includes('mp4');
+ if(!isMp4){
+   e.preventDefault();
+   document.getElementById('status').textContent='⏳ MP4 conversion abhi complete nahi hua. Please wait.';
+   return false;
+ }
+ // Keep the real anchor navigation for maximum Android/Chrome compatibility.
+ document.getElementById('status').textContent='⬇️ Downloading MP4…';
+ return true;
+}
+document.getElementById('downloadVideo').onclick=startVideoDownload;
+document.getElementById('downloadVideoTop').onclick=startVideoDownload;
 
 document.getElementById('generate').onclick=async()=>{
  if(recording)return;
- const d=data();recording=true;chunks=[];
+ const d=data();recording=true;chunks=[];lastVideoBlob=null;
+ document.getElementById('resultBox').style.display='none';
+ document.getElementById('downloadVideo').style.display='none';
+ document.getElementById('downloadVideoTop').style.display='none';
  document.getElementById('status').textContent='Rendering '+d.dur+' sec video…';
- const audio=await makeAudio(d.dur,d.music);
- const stream=cv.captureStream(30);
- audio.getAudioTracks().forEach(tr=>stream.addTrack(tr));
- const mime=chooseMime();recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:8500000,audioBitsPerSecond:128000});
- recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
- const done=new Promise(resolve=>recorder.onstop=()=>resolve());
- recorder.start(250);
- const start=performance.now();
- function render(now){
-   let t=(now-start)/1000;frame(Math.min(t,d.dur),d);
-   if(t<d.dur)raf=requestAnimationFrame(render);else setTimeout(()=>recorder.stop(),150);
- }
- raf=requestAnimationFrame(render);
- await done;recording=false;
- if(audioCtx){try{await audioCtx.close()}catch(e){}}
- const blob=new Blob(chunks,{type:mime});
- if(mime.startsWith('video/mp4')){
-   lastVideoBlob=blob;document.getElementById('resultVideo').src=URL.createObjectURL(blob);document.getElementById('resultBox').style.display='block';showVideoDownload(blob,'quiznova-reel.mp4');downloadBlob(blob,'quiznova-reel.mp4');document.getElementById('status').textContent='✅ MP4 ready — video shown below + download button ready.';
- }else{
-   const mp4=await convertToMp4(blob);
-   if(mp4){lastVideoBlob=mp4;document.getElementById('resultVideo').src=URL.createObjectURL(mp4);document.getElementById('resultBox').style.display='block';showVideoDownload(mp4,'quiznova-reel.mp4');downloadBlob(mp4,'quiznova-reel.mp4');document.getElementById('status').textContent='✅ MP4 ready — video shown below + download button ready.'}
-   else {downloadBlob(blob,'quiznova-reel.webm');document.getElementById('status').textContent='⚠️ MP4 conversion was blocked by this browser. WebM fallback downloaded. Chrome/Edge on a normal HTTPS page is recommended.'}
- }
+ let stream=null;
+ try{
+   const audio=await makeAudio(d.dur,d.music);
+   stream=cv.captureStream(30);
+   audio.getAudioTracks().forEach(tr=>stream.addTrack(tr));
+   const mime=chooseMime();
+   recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:8500000,audioBitsPerSecond:128000});
+   recorder.ondataavailable=e=>{if(e.data && e.data.size)chunks.push(e.data)};
+   const done=new Promise((resolve,reject)=>{
+     recorder.onstop=()=>resolve();
+     recorder.onerror=e=>reject(e.error||e);
+   });
+   recorder.start(250);
+   const startTime=performance.now();
+   function render(now){
+     const t=(now-startTime)/1000;
+     frame(Math.min(t,d.dur),d);
+     if(t<d.dur && recording) raf=requestAnimationFrame(render);
+     else if(recorder && recorder.state!=='inactive') setTimeout(()=>recorder.stop(),200);
+   }
+   raf=requestAnimationFrame(render);
+   await done;
+   if(audioCtx){try{await audioCtx.close()}catch(e){}}
+   const blob=new Blob(chunks,{type:mime});
+   if(!blob.size)throw new Error('Generated video is empty');
+
+   document.getElementById('resultBox').style.display='block';
+   document.getElementById('status').textContent='🎬 Recording complete. MP4 conversion starting…';
+
+   if(mime.toLowerCase().startsWith('video/mp4')){
+     lastVideoBlob=new Blob([blob],{type:'video/mp4'});
+   }else{
+     lastVideoBlob=await convertToMp4(blob);
+   }
+
+   const videoUrl=URL.createObjectURL(lastVideoBlob);
+   document.getElementById('resultVideo').src=videoUrl;
+   document.getElementById('resultVideo').load();
+   showVideoDownload(lastVideoBlob,'quiznova-reel.mp4');
+   document.getElementById('status').textContent='✅ MP4 ready — ab Download MP4 Video tap karo.';
+ }catch(e){
+   console.error('Video generation failed:',e);
+   document.getElementById('status').textContent='❌ '+(e.message||e);
+ }finally{
+   recording=false;
+   if(raf)cancelAnimationFrame(raf);
+   if(stream){try{stream.getTracks().forEach(t=>t.stop())}catch(e){}}
+ };
 };
 window.addEventListener('resize',()=>{});
 logo.onload=()=>frame(0,data());
