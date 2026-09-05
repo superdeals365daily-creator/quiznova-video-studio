@@ -398,63 +398,76 @@ async function urlToBlobUrl(url,type){
 }
 
 async function getFFmpeg(){
- if(ffmpegInstance) return ffmpegInstance;
- const status=document.getElementById('status');
- status.textContent='⏳ Loading MP4 engine…';
-
- // Load the modern FFmpeg API as an ES module.
+ if(ffmpegInstance)return ffmpegInstance;
+ const status=document.getElementById('status'); status.textContent='⏳ Loading MP4 engine…';
  const mod=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js');
- const FFmpegClass=mod.FFmpeg;
- if(!FFmpegClass)throw new Error('Modern FFmpeg API unavailable');
-
+ const FFmpegClass=mod.FFmpeg; if(!FFmpegClass)throw new Error('Modern FFmpeg API unavailable');
  const ff=new FFmpegClass();
- ff.on('progress',({progress})=>{
-   const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100)));
-   status.textContent='⏳ Converting WebM → MP4… '+pct+'%';
- });
+ ff.on('progress',({progress})=>{const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100))); status.textContent='⏳ Converting WebM → MP4… '+pct+'%';});
  ff.on('log',({message})=>console.log('[FFmpeg]',message));
-
  const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/';
  const coreURL=await urlToBlobUrl(base+'ffmpeg-core.js','text/javascript');
  const wasmURL=await urlToBlobUrl(base+'ffmpeg-core.wasm','application/wasm');
- const workerURL=await urlToBlobUrl(base+'ffmpeg-core.worker.js','text/javascript');
-
+ const workerSrcURL='https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js';
+ const wr=await fetch(workerSrcURL,{mode:'cors',cache:'force-cache'});
+ if(!wr.ok)throw new Error('FFmpeg worker download failed: '+wr.status);
+ let ws=await wr.text();
+ ws=ws.replaceAll('"./const.js"','"https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/const.js"').replaceAll('"./errors.js"','"https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/errors.js"');
+ const classWorkerURL=URL.createObjectURL(new Blob([ws],{type:'text/javascript'})); ffmpegObjectUrls.push(classWorkerURL);
  status.textContent='⏳ Starting MP4 engine…';
- await ff.load({coreURL,wasmURL,workerURL});
- ffmpegInstance=ff;
- return ff;
+ await ff.load({coreURL,wasmURL,classWorkerURL});
+ ffmpegInstance=ff; return ff;
 }
+async function convertToMp4(webmBlob,duration){
+  const status=document.getElementById('status');
+  const set=m=>status.textContent=m;
+  if(!webmBlob || !webmBlob.size) throw new Error('Recorded video empty hai.');
+  set('⏳ MP4 engine loading…');
 
-async function convertToMp4(webmBlob){
- if(!webmBlob || !webmBlob.size)throw new Error('Recorded WebM is empty');
- const status=document.getElementById('status');
- const ff=await getFFmpeg();
- const inputName='quiznova-input.webm';
- const outputName='quiznova-output.mp4';
- try{
-   status.textContent='⏳ Preparing video for MP4 conversion…';
-   await ff.writeFile(inputName,new Uint8Array(await webmBlob.arrayBuffer()));
-   status.textContent='⏳ Converting WebM → MP4… 0%';
-   await ff.exec([
-     '-i',inputName,
-     '-c:v','libx264','-preset','ultrafast','-crf','28',
-     '-pix_fmt','yuv420p',
-     '-c:a','aac','-b:a','128k',
-     '-movflags','+faststart',
-     outputName
-   ]);
-   const data=await ff.readFile(outputName);
-   if(!data || !data.length)throw new Error('MP4 output empty');
-   try{await ff.deleteFile(inputName);await ff.deleteFile(outputName)}catch(e){}
-   status.textContent='✅ MP4 conversion complete — 100%';
-   return new Blob([data.buffer],{type:'video/mp4'});
- }catch(e){
-   try{await ff.deleteFile(inputName)}catch(_e){}
-   try{await ff.deleteFile(outputName)}catch(_e){}
-   throw new Error('MP4 conversion failed: '+(e.message||e));
- }
+  // IMPORTANT: use the modern FFmpeg 0.12 API only. The previous code
+  // accidentally mixed the old 0.11 API with the new loader, which can make
+  // MP4 conversion fail on Android/Chrome.
+  const ff=await getFFmpeg();
+  const inputName='quiznova-input.webm';
+  const outputName='quiznova-output.mp4';
+  const sec=Math.max(1,Number(duration)||14);
+
+  try{
+    set('⏳ Preparing video for MP4 conversion…');
+    const bytes=new Uint8Array(await webmBlob.arrayBuffer());
+    await ff.writeFile(inputName,bytes);
+
+    set('⏳ Converting WebM → MP4… 0%');
+    await ff.exec([
+      '-fflags','+genpts',
+      '-i',inputName,
+      '-t',String(sec),
+      '-r','30',
+      '-c:v','libx264',
+      '-preset','ultrafast',
+      '-crf','28',
+      '-pix_fmt','yuv420p',
+      '-c:a','aac',
+      '-b:a','128k',
+      '-af','aresample=async=1:first_pts=0',
+      '-movflags','+faststart',
+      '-avoid_negative_ts','make_zero',
+      outputName
+    ]);
+
+    const data=await ff.readFile(outputName);
+    if(!data || !data.length) throw new Error('FFmpeg ne empty MP4 banaya.');
+
+    // Copy the Uint8Array before FFmpeg memory is reused.
+    const mp4Bytes=new Uint8Array(data.length);
+    mp4Bytes.set(data);
+    set('✅ MP4 conversion complete — 100%');
+    return new Blob([mp4Bytes],{type:'video/mp4'});
+  }finally{
+    try{await ff.deleteFile(inputName)}catch(e){}
+    try{await ff.deleteFile(outputName)}catch(e){}
+  }
 }
-
 function startVideoDownload(e){
  if(!lastVideoBlob || !lastVideoBlob.size){
    e.preventDefault();
@@ -475,60 +488,70 @@ document.getElementById('downloadVideo').onclick=startVideoDownload;
 document.getElementById('downloadVideoTop').onclick=startVideoDownload;
 
 document.getElementById('generate').onclick=async()=>{
- if(recording)return;
- const d=data();recording=true;chunks=[];lastVideoBlob=null;
- document.getElementById('resultBox').style.display='none';
- document.getElementById('downloadVideo').style.display='none';
- document.getElementById('downloadVideoTop').style.display='none';
- document.getElementById('status').textContent='Rendering '+d.dur+' sec video…';
- let stream=null;
- try{
-   const audio=await makeAudio(d.dur,d.music);
-   stream=cv.captureStream(30);
-   audio.getAudioTracks().forEach(tr=>stream.addTrack(tr));
-   const mime=chooseMime();
-   recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:8500000,audioBitsPerSecond:128000});
-   recorder.ondataavailable=e=>{if(e.data && e.data.size)chunks.push(e.data)};
-   const done=new Promise((resolve,reject)=>{
-     recorder.onstop=()=>resolve();
-     recorder.onerror=e=>reject(e.error||e);
-   });
-   recorder.start(250);
-   const startTime=performance.now();
-   function render(now){
-     const t=(now-startTime)/1000;
-     frame(Math.min(t,d.dur),d);
-     if(t<d.dur && recording) raf=requestAnimationFrame(render);
-     else if(recorder && recorder.state!=='inactive') setTimeout(()=>recorder.stop(),200);
-   }
-   raf=requestAnimationFrame(render);
-   await done;
-   if(audioCtx){try{await audioCtx.close()}catch(e){}}
-   const blob=new Blob(chunks,{type:mime});
-   if(!blob.size)throw new Error('Generated video is empty');
+  if(recording)return;
+  const d=data();recording=true;chunks=[];lastVideoBlob=null;
+  cancelAnimationFrame(raf);
+  document.getElementById('resultBox').style.display='none';
+  document.getElementById('downloadVideo').style.display='none';
+  document.getElementById('downloadVideoTop').style.display='none';
+  document.getElementById('status').textContent='Rendering '+d.dur+' sec video…';
+  let renderTimer=null;
+  try{
+    const audio=await makeAudio(d.dur,d.music);
+    const stream=cv.captureStream(30);
+    audio.getAudioTracks().forEach(tr=>stream.addTrack(tr));
+    // Always record WebM first. This avoids browser-dependent MP4 recording
+    // and gives FFmpeg a stable input whose timestamps we normalize below.
+    const mime=(MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? 'video/webm;codecs=vp9,opus'
+      : 'video/webm;codecs=vp8,opus');
+    recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:6000000,audioBitsPerSecond:128000});
+    recorder.ondataavailable=e=>{if(e.data && e.data.size)chunks.push(e.data)};
+    recorder.onerror=e=>console.error('MediaRecorder error:',e);
+    const done=new Promise((resolve,reject)=>{
+      recorder.onstop=()=>resolve();
+      recorder.onerror=e=>reject(e.error||e);
+    });
+    recorder.start();
 
-   document.getElementById('resultBox').style.display='block';
-   document.getElementById('status').textContent='🎬 Recording complete. MP4 conversion starting…';
+    const startTime=performance.now();
+    const renderFrame=()=>{
+      const t=Math.min((performance.now()-startTime)/1000,d.dur);
+      frame(t,d);
+      if(t<d.dur){
+        renderTimer=setTimeout(renderFrame,33);
+      }
+    };
+    renderFrame();
+    await new Promise(r=>setTimeout(r,(d.dur*1000)+250));
+    if(recorder.state!=='inactive')recorder.stop();
+    await done;
+    if(renderTimer)clearTimeout(renderTimer);
+    if(audioCtx){try{await audioCtx.close()}catch(e){}}
 
-   if(mime.toLowerCase().startsWith('video/mp4')){
-     lastVideoBlob=new Blob([blob],{type:'video/mp4'});
-   }else{
-     lastVideoBlob=await convertToMp4(blob);
-   }
-
-   const videoUrl=URL.createObjectURL(lastVideoBlob);
-   document.getElementById('resultVideo').src=videoUrl;
-   document.getElementById('resultVideo').load();
-   showVideoDownload(lastVideoBlob,'quiznova-reel.mp4');
-   document.getElementById('status').textContent='✅ MP4 ready — ab Download MP4 Video tap karo.';
- }catch(e){
-   console.error('Video generation failed:',e);
-   document.getElementById('status').textContent='❌ '+(e.message||e);
- }finally{
-   recording=false;
-   if(raf)cancelAnimationFrame(raf);
-   if(stream){try{stream.getTracks().forEach(t=>t.stop())}catch(e){}}
- };
+    const blob=new Blob(chunks,{type:mime});
+    if(!blob.size)throw new Error('Generated video is empty');
+    document.getElementById('status').textContent='🎬 Recording complete. Converting to a clean '+d.dur+' sec MP4…';
+    const mp4=await convertToMp4(blob,d.dur);
+    if(!mp4 || !mp4.size)throw new Error('MP4 conversion failed.');
+    lastVideoBlob=mp4;
+    document.getElementById('resultBox').style.display='block';
+    document.getElementById('resultVideo').src=URL.createObjectURL(mp4);
+    document.getElementById('resultVideo').load();
+    showVideoDownload(mp4,'quiznova-reel.mp4');
+    // Automatically start the MP4 download as soon as conversion finishes.
+    // The visible Download MP4 buttons remain available as a fallback if the browser blocks it.
+    downloadBlob(mp4,'quiznova-reel.mp4');
+    document.getElementById('status').textContent='✅ '+d.dur+' sec MP4 ready — download automatically start ho raha hai. Agar browser ne block kiya ho to neeche Download MP4 button dabao.';
+  }catch(e){
+    console.error('Video generation failed:',e);
+    if(renderTimer)clearTimeout(renderTimer);
+    document.getElementById('status').textContent='❌ Video generation failed: '+(e.message||e);
+  }finally{
+    if(audioCtx){try{await audioCtx.close()}catch(e){}}
+    if(recorder && recorder.state!=='inactive'){try{recorder.stop()}catch(e){}}
+    recording=false;
+  }
 };
 window.addEventListener('resize',()=>{});
 logo.onload=()=>frame(0,data());
