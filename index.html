@@ -399,25 +399,33 @@ async function urlToBlobUrl(url,type){
 
 async function getFFmpeg(){
  if(ffmpegInstance)return ffmpegInstance;
- const status=document.getElementById('status'); status.textContent='⏳ Loading MP4 engine…';
+ const status=document.getElementById('status');
+ status.textContent='⏳ Loading MP4 engine…';
+
+ // Official ffmpeg.wasm 0.12 browser pattern:
+ // use the ESM JS API, but load the UMD core through blob URLs.
+ // Do NOT create a custom class worker here; that is what was causing
+ // ffmpeg-core.js import failures on Android Chrome.
  const mod=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js');
- const FFmpegClass=mod.FFmpeg; if(!FFmpegClass)throw new Error('Modern FFmpeg API unavailable');
+ const FFmpegClass=mod.FFmpeg;
+ if(!FFmpegClass)throw new Error('Modern FFmpeg API unavailable');
+
  const ff=new FFmpegClass();
- ff.on('progress',({progress})=>{const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100))); status.textContent='⏳ Converting WebM → MP4… '+pct+'%';});
+ ff.on('progress',({progress})=>{
+   const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100)));
+   status.textContent='⏳ Converting WebM → MP4… '+pct+'%';
+ });
  ff.on('log',({message})=>console.log('[FFmpeg]',message));
- // UMD core is intentionally used for plain HTML/mobile Chrome.
- const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/';
- const coreURL=await urlToBlobUrl(base+'ffmpeg-core.js','text/javascript');
- const wasmURL=await urlToBlobUrl(base+'ffmpeg-core.wasm','application/wasm');
- const workerSrcURL='https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js';
- const wr=await fetch(workerSrcURL,{mode:'cors',cache:'force-cache'});
- if(!wr.ok)throw new Error('FFmpeg worker download failed: '+wr.status);
- let ws=await wr.text();
- ws=ws.replaceAll('"./const.js"','"https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/const.js"').replaceAll('"./errors.js"','"https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/errors.js"');
- const classWorkerURL=URL.createObjectURL(new Blob([ws],{type:'text/javascript'})); ffmpegObjectUrls.push(classWorkerURL);
+
+ const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+ const coreURL=await urlToBlobUrl(base+'/ffmpeg-core.js','text/javascript');
+ const wasmURL=await urlToBlobUrl(base+'/ffmpeg-core.wasm','application/wasm');
+
  status.textContent='⏳ Starting MP4 engine…';
- await ff.load({coreURL,wasmURL,classWorkerURL});
- ffmpegInstance=ff; return ff;
+ // Keep the loader exactly to the supported single-thread browser setup.
+ await ff.load({coreURL,wasmURL});
+ ffmpegInstance=ff;
+ return ff;
 }
 async function convertToMp4(webmBlob,duration){
   const status=document.getElementById('status');
