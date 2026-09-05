@@ -382,8 +382,8 @@ function showVideoDownload(blob,name='quiznova-reel.mp4'){
 /*
   Reliable browser-side WebM -> MP4 conversion.
   The old ffmpeg 0.11 loader could fail on mobile/CDN because the worker/core
-  were fetched cross-origin. This version uses ffmpeg.wasm 0.12 and converts
-  the CDN files to same-origin Blob URLs before loading them.
+  were fetched cross-origin. This version uses ffmpeg.wasm 0.12 with the ESM core. The ESM core is important
+  here because the custom module worker loads the core with dynamic import on mobile Chrome.
 */
 let ffmpegInstance=null;
 let ffmpegObjectUrls=[];
@@ -405,7 +405,7 @@ async function getFFmpeg(){
  const ff=new FFmpegClass();
  ff.on('progress',({progress})=>{const pct=Math.max(0,Math.min(100,Math.round((progress||0)*100))); status.textContent='⏳ Converting WebM → MP4… '+pct+'%';});
  ff.on('log',({message})=>console.log('[FFmpeg]',message));
- const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/';
+ const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/';
  const coreURL=await urlToBlobUrl(base+'ffmpeg-core.js','text/javascript');
  const wasmURL=await urlToBlobUrl(base+'ffmpeg-core.wasm','application/wasm');
  const workerSrcURL='https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js';
